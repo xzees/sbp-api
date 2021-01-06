@@ -1,0 +1,15 @@
+# FROM gcr.io/google_appengine/nodejs
+FROM node:14.13-slim
+
+WORKDIR /
+
+COPY . .
+
+RUN npm install -f
+EXPOSE 5000
+
+HEALTHCHECK --interval=20s --timeout=5s --start-period=15s \  
+CMD node /healthcheck.js
+
+
+CMD ["npm", "run", "dev"]

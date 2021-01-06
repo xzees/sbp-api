@@ -1,0 +1,232 @@
+
+version: "3.5"
+
+networks:
+  proxy:
+    name: 'proxy'
+
+services:
+
+    devapi:
+        image: node:13.11.0-alpine
+        container_name: sabuypay-api
+        expose:
+          - 5000
+        volumes:
+            - ./:/home/app:rw
+        working_dir: /home/app
+        links:
+            - cache
+            - cacheadmin
+            - phpmyadmin
+        depends_on:
+            - database
+        networks: 
+            - proxy
+        labels:
+            - "traefik.http.routers.sabuypay-api.rule=Host(`sabuypay.api.localhost`)"
+            - "traefik.http.services.sabuypay-api.loadbalancer.server.port=5000"
+        environment:
+            VIRTUAL_PORT: 5000
+            VIRTUAL_HOST: locahost.sabuypay
+            DB_HOST: database
+            DB_PORT: 3306
+            DB_USER: root
+            DB_PASS: root
+            DB_NAME: sabuypay
+            DB_ENABLE_LOG: "true"
+            REDIS_HOST: cache
+            REDIS_PORT: 6379
+            REDIS_PASSWORD: password
+            
+        restart: on-failure
+        command: npm run dev
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "1024m"
+        deploy:
+            resources: 
+                limits:
+                    cpus: '1'
+                    memory: 1G
+        
+    install:
+        image: node:13.11.0-alpine
+        links:
+            - cache
+            - cacheadmin
+            - phpmyadmin
+        depends_on:
+            - database
+        volumes:
+            - ./:/home/app:rw
+        working_dir: /home/app
+        command: npm install
+
+    cache:
+        image: redis
+        command: redis-server --requirepass password
+        container_name: sabuypay_cache
+        expose:
+            - 6379
+        networks: 
+            - proxy     
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "1024m"
+        deploy:
+            mode: replicated
+            replicas: 1
+            resources:
+                limits:
+                    cpus: '1'
+                    memory: 50M
+                reservations:
+                    cpus: '0.25'
+                    memory: 20M
+    database:
+        image: mysql:5.7
+        container_name: sabuypay_database
+        restart: always
+        expose:
+            - 3306
+        networks: 
+            - proxy
+        environment:
+            MYSQL_ROOT_PASSWORD: root
+            MYSQL_DATABASE: sabuypay
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "1024m"
+
+                
+    cacheadmin:
+        container_name: sabuypay_cache_admin
+        image: erikdubbelboer/phpredisadmin
+        environment:
+            REDIS_1_HOST: cache
+            REDIS_1_NAME: redis
+            REDIS_1_PORT: 6379
+            REDIS_1_AUTH: 'password'
+        expose:
+          - 80
+        networks: 
+            - proxy
+        labels:
+            - "traefik.http.routers.sabuypay_cache_admin.rule=Host(`sabuypay.cache.localhost`)"
+            - "traefik.http.services.sabuypay_cache_admin.loadbalancer.server.port=80"
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "1024m"
+        deploy:
+            mode: replicated
+            replicas: 1
+            resources:
+                limits:
+                    cpus: '1'
+                    memory: 50M
+                reservations:
+                    cpus: '0.25'
+                    memory: 20M
+
+    phpmyadmin:
+        container_name: sabuypay_phpmyadmin
+        image: phpmyadmin/phpmyadmin
+        expose:
+            - 80
+        links:
+            - database
+        networks: 
+            - proxy
+        labels:
+            - "traefik.http.routers.sabuypay_phpmyadmin.rule=Host(`sabuypay.database.localhost`)"
+            - "traefik.http.services.sabuypay_phpmyadmin.loadbalancer.server.port=80"
+        environment:
+            MYSQL_USERNAME: root
+            MYSQL_ROOT_PASSWORD: root
+            PMA_HOST: database
+            UPLOAD_LIMIT: 3000000000
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "1024m"
+
+    zap:
+        image: owasp/zap2docker-weekly
+        container_name: zap
+        entrypoint: zap-full-scan.py -t http://devapi:5000 -r report_zap.html
+        links:
+          - devapi
+        networks: 
+            - proxy
+        volumes:
+            - ./report:/zap/wrk/:rw
+
+    sonarqube:
+        image: sonarqube:8.6-community
+        container_name: sonarqube
+        restart: always
+        ports:
+            - "9000:9000"
+            - "9092:9092"
+        environment:
+            SONARQUBE_JDBC_URL: jdbc:postgresql://db/sonar
+            SONARQUBE_JDBC_USERNAME: sonar
+            SONARQUBE_JDBC_PASSWORD: sonar
+        networks: 
+            - proxy
+        links:
+            - db:db
+            - devapi
+        deploy:
+            resources:
+                limits:
+                    cpus: '1'
+                    memory: 1G
+
+    db:
+        image: postgres
+        container_name: db
+        networks: 
+            - proxy
+        restart: always
+        environment:
+            - POSTGRES_USER=sonar
+            - POSTGRES_DB=sonar
+            - POSTGRES_PASSWORD=sonar
+
+    scanner:
+        image: sonarsource/sonar-scanner-cli
+        container_name: scanner
+        environment:
+            SONAR_HOST_URL: http://sonarqube:9000
+            SONAR_LOGIN: 8f9b4a93015f7d359161e3fc01a24af26b10f716
+        networks: 
+            - proxy
+        links:
+            - sonarqube 
+        volumes: 
+            - ./src:/usr/src
+            - ./sonar-runner.properties:/opt/sonar-scanner/conf/sonar-scanner.properties
+
+    server:
+        image: jetbrains/teamcity-server
+        ports:
+            - "8112:8111"
+        volumes:
+            - ./data_dir:/data/teamcity_server/datadir
+            - ./log_dir:/opt/teamcity/logs
+    teamcity-agent:
+        image: jetbrains/teamcity-agent
+        environment:
+            - SERVER_URL=http://server:8111
+            - AGENT_NAME=regular_agent
+    teamcity-minimal-agent:
+        image: jetbrains/teamcity-minimal-agent
+        environment:
+            - SERVER_URL=http://server:8111
+            - AGENT_NAME=minimal_agent
